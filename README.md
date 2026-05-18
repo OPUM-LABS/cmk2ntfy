@@ -11,3 +11,5 @@ Configurable Parameters:
 * URL Prefix for links (Optional: auto-detected)
 * Disable SSL verification (Optional: for self-signed certs)
 * HTTP Proxy support (Optional)
+
+This Plugin is based on [Notifications via ntfy](https://exchange.checkmk.com/p/notify-via-ntfy)
