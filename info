@@ -1,0 +1,25 @@
+{'author': 'OPUM-LABS',
+ 'description': 'This extension provides a modernized notification plugin for '
+                '[ntfy](https://ntfy.sh), enabling push        \n'
+                'notifications from Checkmk to any ntfy instance. Built for '
+                'Checkmk 2.3, 2.4, and 2.5.\\n\\n\n'
+                'Configurable Parameters:\\n\n'
+                '* Topic (Required)\\n\n'
+                '* ntfy Instance (Required, defaults to ntfy.sh)\\n\n'
+                '* Access Token (Optional: for private topics)\\n\n'
+                '* Host/Service Message Templates (Optional: macro '
+                'support)\\n\n'
+                '* Include Checkmk icon (Optional)\\n\n'
+                '* URL Prefix for links (Optional: auto-detected)\\n\n'
+                '* Disable SSL verification (Optional: for self-signed '
+                'certs)\\n\n'
+                '* HTTP Proxy support (Optional)\n',
+ 'download_url': 'https://github.com/OPUM-LABS',
+ 'files': {'cmk_addons_plugins': ['cmk2ntfy/rulesets/cmk2ntfy.py'],
+           'notifications': ['cmk2ntfy']},
+ 'name': 'cmk2ntfy',
+ 'title': 'cmk2ntfy',
+ 'version': '1.0.0',
+ 'version.min_required': '2.3.0p1',
+ 'version.packaged': '2.5.0p2',
+ 'version.usable_until': None}

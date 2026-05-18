@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+# cmk2ntfy
+# Bulk: no
+
+import os
+import sys
+import traceback
+from typing import Any
+from enum import IntEnum
+
+# pylint: disable=import-error
+from cmk.notification_plugins.utils import (
+    host_url_from_context,
+    process_by_status_code,
+    service_url_from_context,
+    substitute_context,
+)
+
+import requests
+from cmk.utils.http_proxy_config import deserialize_http_proxy_config
+
+
+def load_context() -> Any:
+    """
+    Safely load the notification context.
+    Tries the official PluginNotificationContext class first,
+    falls back to a manual dict from environment variables.
+    """
+    try:
+        from cmk.utils.notify_types import PluginNotificationContext as CMKContext
+        if hasattr(CMKContext, "from_env"):
+            return CMKContext.from_env()
+    except ImportError:
+        pass
+    
+    # Fallback: Manual reconstruction from NOTIFY_ environment variables
+    return {k[7:]: v for k, v in os.environ.items() if k.startswith("NOTIFY_")}
+
+
+def _get_token(context: Any) -> str:
+    """
+    Safer way to retrieve the access token, avoiding IndexError in CMK's native utils.
+    """
+    val = context.get("PARAMETER_CMK2NTFY_ACCESS_TOKEN")
+    if not val:
+        return ""
+    
+    # If it's a simple string and not a serialized tuple/list, it's the token itself.
+    if isinstance(val, str):
+        if not val.strip():
+            return ""
+        if not (val.startswith("(") or val.startswith("[")):
+            return val
+            
+    # If it looks like a complex structure, try the official CMK utility
+    try:
+        from cmk.notification_plugins.utils import get_password_from_env_or_context
+        return get_password_from_env_or_context("PARAMETER_CMK2NTFY_ACCESS_TOKEN", context)
+    except Exception as e:
+        sys.stderr.write(f"cmk2ntfy: get_password_from_env_or_context failed: {e}\n")
+        # Fallback to the raw string if possible
+        return str(val) if isinstance(val, str) else ""
+
+
+class PRIORITY(IntEnum):
+    OK = 3
+    UP = 3
+    WARN = 3
+    WARNING = 3
+    CRIT = 4
+    CRITICAL = 4
+    DOWN = 4
+    UNREACH = 4
+    UNKN = 2
+
+
+class TAGICON:
+    OK = "green_circle"
+    UP = "green_circle"
+    WARN = "yellow_circle"
+    WARNING = "yellow_circle"
+    CRIT = "red_circle"
+    CRITICAL = "red_circle"
+    DOWN = "red_circle"
+    UNREACH = "red_circle"
+    UNKN = "white_circle"
+
+    @classmethod
+    def get(cls, state: str) -> str:
+        return getattr(cls, str(state), cls.UNKN)
+
+
+HOST_MSG_TMPL_FALLBACK = "Host: $HOSTALIAS$ $HOSTSTATE$\n\n$HOSTOUTPUT$"
+SVC_MSG_TMPL_FALLBACK = (
+    "Service: $HOSTALIAS$ / $SERVICEDESC$ $SERVICESTATE$\n\n$SERVICEOUTPUT$"
+)
+URL_FALLBACK = "https://ntfy.sh"
+
+
+def _cmk2ntfy_message_constructor(context: Any) -> dict[str, Any]:
+    """Build the message"""
+
+    what = context.get("WHAT")
+    if what == "SERVICE":
+        state = context.get("SERVICESTATE")
+        item_url = service_url_from_context(context)
+        msg_tmpl = "PARAMETER_CMK2NTFY_SVC_MSG_TMPL"
+        msg_tmpl_fallback = SVC_MSG_TMPL_FALLBACK
+    elif what == "HOST":
+        state = context.get("HOSTSTATE")
+        item_url = host_url_from_context(context)
+        msg_tmpl = "PARAMETER_CMK2NTFY_HOST_MSG_TMPL"
+        msg_tmpl_fallback = HOST_MSG_TMPL_FALLBACK
+    else:
+        sys.stderr.write(f"unknown Type: {what}, expecting: SERVICE or HOST. sending generic message\n")
+        state = "UNKN"
+        item_url = ""
+        msg_tmpl = ""
+        context_as_str = "\n".join([f"{k}: '{v}'" for k, v in context.items()])
+        msg_tmpl_fallback = f"UNKNOWN Notification Type: {what}\n\ncontext:\n{context_as_str}"
+
+    tag_icon = TAGICON.get(state)
+    try:
+        priority = int(getattr(PRIORITY, str(state), PRIORITY.UNKN))
+    except (AttributeError, TypeError, ValueError):
+        priority = PRIORITY.UNKN
+
+    msg_template_val = context.get(msg_tmpl)
+    if not msg_template_val:
+        msg_template_val = msg_tmpl_fallback
+
+    try:
+        item_title, item_message = str(msg_template_val).split("\n\n", 1)
+    except ValueError:
+        item_title = str(msg_template_val)
+        item_message = ""
+
+    notification_type = context.get("NOTIFICATIONTYPE")
+    if notification_type == "ACKNOWLEDGEMENT":
+        item_title += " (acknowledged)"
+        item_message += f"\n{context.get('NOTIFICATIONAUTHORALIAS', '')} acknowledged with comment: \n{context.get('NOTIFICATIONCOMMENT', '')}"
+    elif notification_type == "FLAPPINGSTART":
+        item_title += " (started flapping)"
+    elif notification_type == "FLAPPINGSTOP":
+        item_title += " (stopped flapping)"
+    elif notification_type == "CUSTOM":
+        item_title += " (via custom command)"
+    elif notification_type == "ALERTHANDLER":
+        item_title += " (via alerthandler)"
+
+    ntfy_data: dict[str, Any] = {
+        "topic": context.get("PARAMETER_CMK2NTFY_TOPIC"),
+        "title": substitute_context(item_title, context),
+        "message": substitute_context(item_message, context),
+        "priority": priority,
+        "tags": [tag_icon],
+    }
+
+    if item_url and str(item_url).lower().startswith("http"):
+        ntfy_data.update(
+            {
+                "actions": [
+                    {
+                        "action": "view",
+                        "label": f"Open {context.get('OMD_SITE')}",
+                        "url": item_url,
+                        "clear": True,
+                    },
+                ]
+            }
+        )
+
+    if context.get("PARAMETER_CMK2NTFY_INCLUDE_CMK_ICON"):
+        ntfy_data.update({"icon": "https://checkmk.com/favicon.ico"})
+
+    return ntfy_data
+
+
+def _auth_headers(headers: dict[str, str], context: Any) -> dict[str, str]:
+    token = _get_token(context)
+    if token and token.strip():
+        headers.update({"Authorization": f"Bearer {token}"})
+    return headers
+
+
+def _post_request() -> requests.Response:
+    context = load_context()
+    
+    serialized_proxy_config = context.get("PARAMETER_PROXY_URL")
+    verify = "PARAMETER_IGNORE_SSL" not in context
+
+    headers = {}
+    headers = _auth_headers(headers, context)
+
+    url = context.get("PARAMETER_CMK2NTFY_INSTANCE", URL_FALLBACK)
+    if url and not (str(url).startswith("http://") or str(url).startswith("https://")):
+        url = f"https://{url}"
+
+    ntfy_payload = _cmk2ntfy_message_constructor(context)
+    
+    sys.stderr.write(f"cmk2ntfy: posting to {url} (topic: {ntfy_payload.get('topic')})\n")
+
+    try:
+        response = requests.post(
+            url=url,
+            json=ntfy_payload,
+            proxies=deserialize_http_proxy_config(serialized_proxy_config).to_requests_proxies(),
+            headers=headers or None,
+            verify=verify,
+            timeout=10,
+        )
+        sys.stderr.write(f"cmk2ntfy: response status: {response.status_code}\n")
+        sys.stderr.write(f"cmk2ntfy: response body: {response.text}\n")
+        return response
+    except Exception as e:
+        sys.stderr.write(f"cmk2ntfy: error during request: {e}\n")
+        raise
+
+
+def main() -> int:
+    try:
+        return process_by_status_code(_post_request(), success_code=200)
+    except Exception:
+        traceback.print_exc(file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
