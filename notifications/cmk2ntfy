@@ -40,6 +40,7 @@ def load_context() -> Any:
 def _get_token(context: Any) -> str:
     """
     Safer way to retrieve the access token, avoiding IndexError in CMK's native utils.
+    Handles raw strings, password-store integration, and fallback ast parsing for serialized configs.
     """
     val = context.get("PARAMETER_CMK2NTFY_ACCESS_TOKEN")
     if not val:
@@ -58,6 +59,23 @@ def _get_token(context: Any) -> str:
         return get_password_from_env_or_context("PARAMETER_CMK2NTFY_ACCESS_TOKEN", context)
     except Exception as e:
         sys.stderr.write(f"cmk2ntfy: get_password_from_env_or_context failed: {e}\n")
+        
+        # If it is a string representing a tuple/list, parse it using ast.literal_eval as fallback
+        if isinstance(val, str) and (val.startswith("(") or val.startswith("[")):
+            import ast
+            try:
+                parsed_val = ast.literal_eval(val)
+                if isinstance(parsed_val, (tuple, list)):
+                    # A migrated password has the structure:
+                    # ("cmk_postprocessed", "explicit_password", (password_id, password_value))
+                    if len(parsed_val) == 3 and parsed_val[0] == "cmk_postprocessed":
+                        pw_type = parsed_val[1]
+                        pw_data = parsed_val[2]
+                        if pw_type == "explicit_password" and isinstance(pw_data, (tuple, list)) and len(pw_data) == 2:
+                            return pw_data[1]
+            except Exception as ast_err:
+                sys.stderr.write(f"cmk2ntfy: fallback ast parsing failed: {ast_err}\n")
+                
         # Fallback to the raw string if possible
         return str(val) if isinstance(val, str) else ""
 
@@ -87,7 +105,7 @@ class TAGICON:
 
     @classmethod
     def get(cls, state: str) -> str:
-        return getattr(cls, str(state), cls.UNKN)
+        return getattr(cls, str(state).upper() if state else "UNKN", cls.UNKN)
 
 
 HOST_MSG_TMPL_FALLBACK = "Host: $HOSTALIAS$ $HOSTSTATE$\n\n$HOSTOUTPUT$"
@@ -119,9 +137,15 @@ def _cmk2ntfy_message_constructor(context: Any) -> dict[str, Any]:
         context_as_str = "\n".join([f"{k}: '{v}'" for k, v in context.items()])
         msg_tmpl_fallback = f"UNKNOWN Notification Type: {what}\n\ncontext:\n{context_as_str}"
 
+    # Normalize state to uppercase for case-insensitive matches in PRIORITY and TAGICON
+    if state:
+        state = str(state).upper()
+    else:
+        state = "UNKN"
+
     tag_icon = TAGICON.get(state)
     try:
-        priority = int(getattr(PRIORITY, str(state), PRIORITY.UNKN))
+        priority = int(getattr(PRIORITY, state, PRIORITY.UNKN))
     except (AttributeError, TypeError, ValueError):
         priority = PRIORITY.UNKN
 
@@ -200,11 +224,18 @@ def _post_request() -> requests.Response:
     
     sys.stderr.write(f"cmk2ntfy: posting to {url} (topic: {ntfy_payload.get('topic')})\n")
 
+    proxies = None
+    if serialized_proxy_config:
+        try:
+            proxies = deserialize_http_proxy_config(serialized_proxy_config).to_requests_proxies()
+        except Exception as e:
+            sys.stderr.write(f"cmk2ntfy: failed to deserialize proxy configuration: {e}\n")
+
     try:
         response = requests.post(
             url=url,
             json=ntfy_payload,
-            proxies=deserialize_http_proxy_config(serialized_proxy_config).to_requests_proxies(),
+            proxies=proxies,
             headers=headers or None,
             verify=verify,
             timeout=10,

@@ -15,11 +15,11 @@
                 'certs)\\n\n'
                 '* HTTP Proxy support (Optional)\n',
  'download_url': 'https://github.com/OPUM-LABS',
- 'files': {'cmk_addons_plugins': ['cmk2ntfy/rulesets/cmk2ntfy.py'],
+ 'files': {'lib': ['python3/cmk_addons_plugins/cmk2ntfy/rulesets/cmk2ntfy.py'],
            'notifications': ['cmk2ntfy']},
  'name': 'cmk2ntfy',
  'title': 'cmk2ntfy',
- 'version': '1.0.0',
+ 'version': '1.1.0',
  'version.min_required': '2.3.0p1',
  'version.packaged': '2.5.0p2',
  'version.usable_until': None}
