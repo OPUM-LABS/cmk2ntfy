@@ -98,7 +98,14 @@ def _migrate_to_password(
     Literal["explicit_password", "stored_password"],
     tuple[str, str],
 ]:
-    if isinstance(password, tuple):
+    if isinstance(password, str):
+        return (
+            "cmk_postprocessed",
+            "explicit_password",
+            (password_store.ad_hoc_password_id(), password),
+        )
+
+    if isinstance(password, (tuple, list)):
         if password[0] == "store":
             return ("cmk_postprocessed", "stored_password", (password[1], ""))
 
@@ -111,7 +118,11 @@ def _migrate_to_password(
 
         # Already migrated
         assert len(password) == 3
-        return password
+        return (
+            "cmk_postprocessed",
+            "explicit_password" if password[1] == "explicit_password" else "stored_password",
+            (password[2][0], password[2][1]),
+        )
 
     raise ValueError(f"Invalid password format: {password}")
 
@@ -203,6 +214,7 @@ def _valuespec_cmk2ntfy() -> Dictionary:
             ),
         },
     )
+
 
 rule_spec_notification_cmk2ntfy = NotificationParameters(
     title=Title("cmk2ntfy"),
