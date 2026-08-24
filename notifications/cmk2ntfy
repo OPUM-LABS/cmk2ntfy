@@ -45,39 +45,56 @@ def _get_token(context: Any) -> str:
     val = context.get("PARAMETER_CMK2NTFY_ACCESS_TOKEN")
     if not val:
         return ""
-    
-    # If it's a simple string and not a serialized tuple/list, it's the token itself.
-    if isinstance(val, str):
-        if not val.strip():
-            return ""
-        if not (val.startswith("(") or val.startswith("[")):
-            return val
-            
-    # If it looks like a complex structure, try the official CMK utility
+
+    # 1. Try Checkmk's official retrieve_from_passwordstore utility
     try:
-        from cmk.notification_plugins.utils import get_password_from_env_or_context
-        return get_password_from_env_or_context("PARAMETER_CMK2NTFY_ACCESS_TOKEN", context)
+        from cmk.notification_plugins.utils import retrieve_from_passwordstore
+        resolved = retrieve_from_passwordstore(val)
+        if resolved:
+            return str(resolved).strip()
     except Exception as e:
-        sys.stderr.write(f"cmk2ntfy: get_password_from_env_or_context failed: {e}\n")
-        
-        # If it is a string representing a tuple/list, parse it using ast.literal_eval as fallback
-        if isinstance(val, str) and (val.startswith("(") or val.startswith("[")):
-            import ast
-            try:
-                parsed_val = ast.literal_eval(val)
-                if isinstance(parsed_val, (tuple, list)):
-                    # A migrated password has the structure:
-                    # ("cmk_postprocessed", "explicit_password", (password_id, password_value))
-                    if len(parsed_val) == 3 and parsed_val[0] == "cmk_postprocessed":
-                        pw_type = parsed_val[1]
-                        pw_data = parsed_val[2]
-                        if pw_type == "explicit_password" and isinstance(pw_data, (tuple, list)) and len(pw_data) == 2:
-                            return pw_data[1]
-            except Exception as ast_err:
-                sys.stderr.write(f"cmk2ntfy: fallback ast parsing failed: {ast_err}\n")
-                
-        # Fallback to the raw string if possible
-        return str(val) if isinstance(val, str) else ""
+        sys.stderr.write(f"cmk2ntfy: retrieve_from_passwordstore failed: {e}\n")
+
+    # 2. Parse serialized strings if necessary
+    parsed_val = val
+    if isinstance(val, str) and (val.startswith("(") or val.startswith("[")):
+        import ast
+        try:
+            parsed_val = ast.literal_eval(val)
+        except Exception as ast_err:
+            sys.stderr.write(f"cmk2ntfy: fallback ast parsing failed: {ast_err}\n")
+            parsed_val = val
+
+    # 3. Handle structured password objects (tuples/lists)
+    if isinstance(parsed_val, (tuple, list)):
+        try:
+            # Structure from migrated Checkmk password:
+            # ("cmk_postprocessed", pw_type, (password_id, password_value))
+            if len(parsed_val) == 3 and parsed_val[0] == "cmk_postprocessed":
+                pw_type = parsed_val[1]
+                pw_data = parsed_val[2]
+                if pw_type == "explicit_password" and isinstance(pw_data, (tuple, list)) and len(pw_data) == 2:
+                    return str(pw_data[1]).strip()
+                if pw_type == "stored_password" and isinstance(pw_data, (tuple, list)) and len(pw_data) >= 1:
+                    from cmk.utils import password_store
+                    return str(password_store.extract(pw_data[0])).strip()
+            elif len(parsed_val) == 2:
+                if parsed_val[0] == "explicit_password" and isinstance(parsed_val[1], (tuple, list)) and len(parsed_val[1]) == 2:
+                    return str(parsed_val[1][1]).strip()
+                if parsed_val[0] == "explicit_password" and isinstance(parsed_val[1], str):
+                    return parsed_val[1].strip()
+                if parsed_val[0] == "stored_password":
+                    from cmk.utils import password_store
+                    return str(password_store.extract(parsed_val[1])).strip()
+        except Exception as err:
+            sys.stderr.write(f"cmk2ntfy: failed extracting password from structure: {err}\n")
+            return ""
+
+    # 4. Fallback for plain string token
+    if isinstance(val, str) and not (val.startswith("(") or val.startswith("[")):
+        return val.strip()
+
+    return ""
 
 
 class PRIORITY(IntEnum):
