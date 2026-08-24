@@ -10,8 +10,9 @@
                 '* Host/Service Message Templates (Optional: macro '
                 'support)\\n\n'
                 '* Include Checkmk icon (Optional)\\n\n'
-                '* Site name for action link (Optional)\\n\n'
-                '* URL Prefix for links (Optional: auto-detected)\\n\n'
+                '* URL Prefix for links (Optional: for reverse proxy '
+                'setups)\\n\n'
+                '* Button label site name (Optional)\\n\n'
                 '* Disable SSL verification (Optional: for self-signed '
                 'certs)\\n\n'
                 '* HTTP Proxy support (Optional)\n',

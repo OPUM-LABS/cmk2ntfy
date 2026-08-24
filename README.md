@@ -11,7 +11,8 @@ Configurable Parameters:
 * Access Token (Optional: for private topics)
 * Host/Service Message Templates (Optional: macro support)
 * Include Checkmk icon (Optional)
-* URL Prefix for links (Optional: auto-detected)
+* URL Prefix for links (Optional: for reverse proxy setups)
+* Button label site name (Optional)
 * Disable SSL verification (Optional: for self-signed certs)
 * HTTP Proxy support (Optional)
 

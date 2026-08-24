@@ -160,6 +160,27 @@ def _get_item_url(context: Any) -> str:
     supporting manual URL prefixes (e.g. reverse proxy setups).
     """
     what = context.get("WHAT")
+
+    # 1. Check if user configured a custom URL prefix directly in cmk2ntfy_url_prefix
+    custom_url_prefix = (
+        context.get("PARAMETER_CMK2NTFY_URL_PREFIX")
+        or context.get("PARAMETER_CMK2NTFY_URL")
+        or context.get("PARAMETER_CMK2NTFY_LINK")
+    )
+    if custom_url_prefix and isinstance(custom_url_prefix, str) and custom_url_prefix.strip():
+        prefix = custom_url_prefix.strip()
+        if not prefix.endswith("/"):
+            prefix += "/"
+        import urllib.parse
+        hostname = context.get("HOSTNAME", "")
+        if what == "SERVICE":
+            servicedesc = context.get("SERVICEDESC", "")
+            start_url = f"view.py?view_name=service&host={urllib.parse.quote_plus(hostname)}&service={urllib.parse.quote_plus(servicedesc)}"
+        else:
+            start_url = f"view.py?view_name=hoststatus&host={urllib.parse.quote_plus(hostname)}"
+        return f"{prefix}index.py?start_url={urllib.parse.quote_plus(start_url)}"
+
+    # 2. Try official Checkmk helpers with normalized PARAMETER_URL_PREFIX
     try:
         if what == "SERVICE":
             url = service_url_from_context(context)
@@ -172,7 +193,7 @@ def _get_item_url(context: Any) -> str:
     except Exception as e:
         sys.stderr.write(f"cmk2ntfy: url_from_context failed: {e}\n")
 
-    # Fallback manual URL construction if Checkmk helper fails or is unavailable
+    # 3. Fallback manual URL construction if Checkmk helper fails or is unavailable
     url_prefix_param = context.get("PARAMETER_URL_PREFIX")
     prefix = None
     if isinstance(url_prefix_param, (tuple, list)) and len(url_prefix_param) == 2:

@@ -172,9 +172,21 @@ def _valuespec_cmk2ntfy() -> Dictionary:
                     label=Label("Include Check_mk icon in Notification Message"),
                 )
             ),
+            "cmk2ntfy_url_prefix": DictElement(
+                parameter_form=String(
+                    title=Title("URL prefix for Checkmk links (e.g. reverse proxy)"),
+                    help_text=Help(
+                        "Specify the URL prefix used for links to Checkmk (e.g. <tt>https://monitoring.example.com/check_mk/</tt>). "
+                        "Useful when Checkmk is behind a reverse proxy and has a different URL than the internal OMD site name. "
+                        "If left empty, the standard automatic URL is used."
+                    ),
+                    custom_validate=[Url([UrlProtocol.HTTP, UrlProtocol.HTTPS])],
+                ),
+                required=False,
+            ),
             "cmk2ntfy_site": DictElement(
                 parameter_form=String(
-                    title=Title("Site name"),
+                    title=Title("Button label site name (optional)"),
                     help_text=Help(
                         "Custom Checkmk site name displayed on the action button (e.g. 'Open <site>'). "
                         "If not defined, the OMD site ($OMD_SITE$) is used."
