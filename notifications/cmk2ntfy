@@ -20,6 +20,28 @@ import requests
 from cmk.utils.http_proxy_config import deserialize_http_proxy_config
 
 
+def _normalize_context(context: Any) -> Any:
+    """
+    Ensure serialized tuples/strings from NOTIFY_ environment variables
+    are properly normalized into Python structures for Checkmk helpers.
+    """
+    if isinstance(context, dict):
+        url_prefix = context.get("PARAMETER_URL_PREFIX")
+        if url_prefix and isinstance(url_prefix, str):
+            val_trimmed = url_prefix.strip()
+            if val_trimmed.startswith("(") or val_trimmed.startswith("["):
+                import ast
+                try:
+                    parsed = ast.literal_eval(val_trimmed)
+                    if isinstance(parsed, (tuple, list)):
+                        context["PARAMETER_URL_PREFIX"] = tuple(parsed)
+                except Exception:
+                    pass
+            elif val_trimmed.startswith("http://") or val_trimmed.startswith("https://"):
+                context["PARAMETER_URL_PREFIX"] = ("manual", val_trimmed)
+    return context
+
+
 def load_context() -> Any:
     """
     Safely load the notification context.
@@ -29,12 +51,12 @@ def load_context() -> Any:
     try:
         from cmk.utils.notify_types import PluginNotificationContext as CMKContext
         if hasattr(CMKContext, "from_env"):
-            return CMKContext.from_env()
+            return _normalize_context(CMKContext.from_env())
     except ImportError:
         pass
     
     # Fallback: Manual reconstruction from NOTIFY_ environment variables
-    return {k[7:]: v for k, v in os.environ.items() if k.startswith("NOTIFY_")}
+    return _normalize_context({k[7:]: v for k, v in os.environ.items() if k.startswith("NOTIFY_")})
 
 
 def _get_token(context: Any) -> str:
@@ -132,27 +154,77 @@ SVC_MSG_TMPL_FALLBACK = (
 URL_FALLBACK = "https://ntfy.sh"
 
 
+def _get_item_url(context: Any) -> str:
+    """
+    Safely get the host or service URL from Checkmk context,
+    supporting manual URL prefixes (e.g. reverse proxy setups).
+    """
+    what = context.get("WHAT")
+    try:
+        if what == "SERVICE":
+            url = service_url_from_context(context)
+            if url:
+                return str(url)
+        elif what == "HOST":
+            url = host_url_from_context(context)
+            if url:
+                return str(url)
+    except Exception as e:
+        sys.stderr.write(f"cmk2ntfy: url_from_context failed: {e}\n")
+
+    # Fallback manual URL construction if Checkmk helper fails or is unavailable
+    url_prefix_param = context.get("PARAMETER_URL_PREFIX")
+    prefix = None
+    if isinstance(url_prefix_param, (tuple, list)) and len(url_prefix_param) == 2:
+        method, custom_prefix = url_prefix_param
+        if method == "manual" and custom_prefix:
+            prefix = str(custom_prefix)
+        elif method == "automatic_http":
+            prefix = f"http://{context.get('MONITORING_HOST', 'localhost')}/{context.get('OMD_SITE', '')}/check_mk/"
+        elif method == "automatic_https":
+            prefix = f"https://{context.get('MONITORING_HOST', 'localhost')}/{context.get('OMD_SITE', '')}/check_mk/"
+    elif isinstance(url_prefix_param, str) and (url_prefix_param.startswith("http://") or url_prefix_param.startswith("https://")):
+        prefix = url_prefix_param
+
+    if not prefix:
+        site = context.get("OMD_SITE", "")
+        host = context.get("MONITORING_HOST", "localhost")
+        prefix = f"https://{host}/{site}/check_mk/" if site else f"https://{host}/check_mk/"
+
+    if not prefix.endswith("/"):
+        prefix += "/"
+
+    import urllib.parse
+    hostname = context.get("HOSTNAME", "")
+    if what == "SERVICE":
+        servicedesc = context.get("SERVICEDESC", "")
+        start_url = f"view.py?view_name=service&host={urllib.parse.quote_plus(hostname)}&service={urllib.parse.quote_plus(servicedesc)}"
+    else:
+        start_url = f"view.py?view_name=hoststatus&host={urllib.parse.quote_plus(hostname)}"
+
+    return f"{prefix}index.py?start_url={urllib.parse.quote_plus(start_url)}"
+
+
 def _cmk2ntfy_message_constructor(context: Any) -> dict[str, Any]:
     """Build the message"""
 
     what = context.get("WHAT")
     if what == "SERVICE":
         state = context.get("SERVICESTATE")
-        item_url = service_url_from_context(context)
         msg_tmpl = "PARAMETER_CMK2NTFY_SVC_MSG_TMPL"
         msg_tmpl_fallback = SVC_MSG_TMPL_FALLBACK
     elif what == "HOST":
         state = context.get("HOSTSTATE")
-        item_url = host_url_from_context(context)
         msg_tmpl = "PARAMETER_CMK2NTFY_HOST_MSG_TMPL"
         msg_tmpl_fallback = HOST_MSG_TMPL_FALLBACK
     else:
         sys.stderr.write(f"unknown Type: {what}, expecting: SERVICE or HOST. sending generic message\n")
         state = "UNKN"
-        item_url = ""
         msg_tmpl = ""
         context_as_str = "\n".join([f"{k}: '{v}'" for k, v in context.items()])
         msg_tmpl_fallback = f"UNKNOWN Notification Type: {what}\n\ncontext:\n{context_as_str}"
+
+    item_url = _get_item_url(context)
 
     # Normalize state to uppercase for case-insensitive matches in PRIORITY and TAGICON
     if state:
@@ -198,12 +270,18 @@ def _cmk2ntfy_message_constructor(context: Any) -> dict[str, Any]:
     }
 
     if item_url and str(item_url).lower().startswith("http"):
+        site = context.get("PARAMETER_CMK2NTFY_SITE") or context.get("PARAMETER_CMK2NTFY_SITE_NAME")
+        if site:
+            site = substitute_context(str(site), context)
+        else:
+            site = context.get("OMD_SITE") or "OMD_SITE"
+
         ntfy_data.update(
             {
                 "actions": [
                     {
                         "action": "view",
-                        "label": f"Open {context.get('OMD_SITE')}",
+                        "label": f"Open {site}",
                         "url": item_url,
                         "clear": True,
                     },

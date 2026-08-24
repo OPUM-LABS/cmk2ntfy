@@ -10,6 +10,7 @@
                 '* Host/Service Message Templates (Optional: macro '
                 'support)\\n\n'
                 '* Include Checkmk icon (Optional)\\n\n'
+                '* Site name for action link (Optional)\\n\n'
                 '* URL Prefix for links (Optional: auto-detected)\\n\n'
                 '* Disable SSL verification (Optional: for self-signed '
                 'certs)\\n\n'

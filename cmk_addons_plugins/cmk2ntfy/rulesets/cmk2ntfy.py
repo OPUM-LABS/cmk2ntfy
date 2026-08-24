@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import os
 import socket
 from typing import Any, Literal
 
@@ -26,7 +27,10 @@ from cmk.utils import password_store
 
 
 def local_site_url() -> str:
-    return "https://" + socket.gethostname() + "/check_mk/"
+    site = os.environ.get("OMD_SITE")
+    if site:
+        return f"https://{socket.gethostname()}/{site}/check_mk/"
+    return f"https://{socket.gethostname()}/check_mk/"
 
 
 def _migrate_url_prefix(p: object) -> tuple[str, str | None]:
@@ -54,12 +58,10 @@ def _get_url_prefix_setting(
             help_text=Help(
                 "If you use <b>Automatic HTTP/s</b>, the URL prefix for "
                 "host and service links within the notification is filled "
-                "automatically. If you specify an URL prefix here, then "
-                "several parts of the notification are armed with hyperlinks "
-                "to your Checkmk GUI. In both cases, the recipient of the "
-                "notification can directly visit the host or service in "
-                "question in Checkmk. Specify an absolute URL including the "
-                "<tt>.../check_mk/</tt>."
+                "automatically based on the monitoring host and site name. "
+                "If Checkmk sits behind a reverse proxy or uses a custom domain/path, "
+                "select <b>Specify URL prefix</b> and provide the full URL prefix "
+                "including <tt>.../check_mk/</tt> (e.g. <tt>https://monitoring.example.com/check_mk/</tt>)."
             ),
             elements=[
                 CascadingSingleChoiceElement(
@@ -168,6 +170,16 @@ def _valuespec_cmk2ntfy() -> Dictionary:
                     ),
                     value=True,
                     label=Label("Include Check_mk icon in Notification Message"),
+                )
+            ),
+            "cmk2ntfy_site": DictElement(
+                parameter_form=String(
+                    title=Title("Site name"),
+                    help_text=Help(
+                        "Custom Checkmk site name displayed on the action button (e.g. 'Open <site>'). "
+                        "If not defined, the OMD site ($OMD_SITE$) is used."
+                    ),
+                    macro_support=True,
                 )
             ),
             "cmk2ntfy_host_msg_tmpl": DictElement(
