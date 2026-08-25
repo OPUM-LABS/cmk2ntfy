@@ -61,60 +61,126 @@ def load_context() -> Any:
 
 def _get_token(context: Any) -> str:
     """
-    Safer way to retrieve the access token, avoiding IndexError in CMK's native utils.
-    Handles raw strings, password-store integration, and fallback ast parsing for serialized configs.
+    Safely retrieve the access token across Checkmk 2.3, 2.4, and 2.5.
+    Supports:
+      1. Official Checkmk get_password_from_env_or_context / retrieve_from_passwordstore
+      2. Direct and flattened PARAMETER_CMK2NTFY_ACCESS_TOKEN keys in context / os.environ
+      3. Structured/migrated password tuples (explicit or password store)
+      4. Fallback search for token values or password store IDs
     """
-    val = context.get("PARAMETER_CMK2NTFY_ACCESS_TOKEN")
-    if not val:
-        return ""
-
-    # 1. Try Checkmk's official retrieve_from_passwordstore utility
+    # 1. Try official Checkmk get_password_from_env_or_context helper
     try:
-        from cmk.notification_plugins.utils import retrieve_from_passwordstore
-        resolved = retrieve_from_passwordstore(val)
-        if resolved:
-            return str(resolved).strip()
+        from cmk.notification_plugins.utils import get_password_from_env_or_context
+        token = get_password_from_env_or_context("PARAMETER_CMK2NTFY_ACCESS_TOKEN", context)
+        if token:
+            return str(token).strip()
+        token = get_password_from_env_or_context("CMK2NTFY_ACCESS_TOKEN", context)
+        if token:
+            return str(token).strip()
+    except (ImportError, AttributeError):
+        pass
     except Exception as e:
-        sys.stderr.write(f"cmk2ntfy: retrieve_from_passwordstore failed: {e}\n")
+        sys.stderr.write(f"cmk2ntfy: get_password_from_env_or_context failed: {e}\n")
 
-    # 2. Parse serialized strings if necessary
-    parsed_val = val
-    if isinstance(val, str) and (val.startswith("(") or val.startswith("[")):
-        import ast
+    # 2. Check if a direct token string or tuple is in context["PARAMETER_CMK2NTFY_ACCESS_TOKEN"]
+    val = context.get("PARAMETER_CMK2NTFY_ACCESS_TOKEN") if isinstance(context, dict) else None
+
+    # Try official retrieve_from_passwordstore if val is present
+    if val:
         try:
-            parsed_val = ast.literal_eval(val)
-        except Exception as ast_err:
-            sys.stderr.write(f"cmk2ntfy: fallback ast parsing failed: {ast_err}\n")
-            parsed_val = val
+            from cmk.notification_plugins.utils import retrieve_from_passwordstore
+            resolved = retrieve_from_passwordstore(val)
+            if resolved:
+                return str(resolved).strip()
+        except Exception:
+            pass
 
-    # 3. Handle structured password objects (tuples/lists)
-    if isinstance(parsed_val, (tuple, list)):
-        try:
-            # Structure from migrated Checkmk password:
-            # ("cmk_postprocessed", pw_type, (password_id, password_value))
-            if len(parsed_val) == 3 and parsed_val[0] == "cmk_postprocessed":
-                pw_type = parsed_val[1]
-                pw_data = parsed_val[2]
-                if pw_type == "explicit_password" and isinstance(pw_data, (tuple, list)) and len(pw_data) == 2:
-                    return str(pw_data[1]).strip()
-                if pw_type == "stored_password" and isinstance(pw_data, (tuple, list)) and len(pw_data) >= 1:
-                    from cmk.utils import password_store
-                    return str(password_store.extract(pw_data[0])).strip()
-            elif len(parsed_val) == 2:
-                if parsed_val[0] == "explicit_password" and isinstance(parsed_val[1], (tuple, list)) and len(parsed_val[1]) == 2:
-                    return str(parsed_val[1][1]).strip()
-                if parsed_val[0] == "explicit_password" and isinstance(parsed_val[1], str):
-                    return parsed_val[1].strip()
-                if parsed_val[0] == "stored_password":
-                    from cmk.utils import password_store
-                    return str(password_store.extract(parsed_val[1])).strip()
-        except Exception as err:
-            sys.stderr.write(f"cmk2ntfy: failed extracting password from structure: {err}\n")
-            return ""
+    # 3. If val is not present or unresolved, check flattened keys (e.g. PARAMETER_CMK2NTFY_ACCESS_TOKEN_*)
+    # Checkmk flattens ("cmk_postprocessed", "explicit_password", (id, "token")) into:
+    # PARAMETER_CMK2NTFY_ACCESS_TOKEN_1 = "cmk_postprocessed"
+    # PARAMETER_CMK2NTFY_ACCESS_TOKEN_2 = "explicit_password" or "stored_password"
+    # PARAMETER_CMK2NTFY_ACCESS_TOKEN_3 = "uuid...       token"
+    # PARAMETER_CMK2NTFY_ACCESS_TOKEN_3_1 = "uuid..." (password store ID or ad-hoc ID)
+    # PARAMETER_CMK2NTFY_ACCESS_TOKEN_3_2 = "token" (explicit token)
+    env_and_context: dict[str, Any] = {}
+    if isinstance(context, dict):
+        env_and_context.update(context)
+    env_and_context.update({k[7:] if k.startswith("NOTIFY_") else k: v for k, v in os.environ.items()})
 
-    # 4. Fallback for plain string token
-    if isinstance(val, str) and not (val.startswith("(") or val.startswith("[")):
-        return val.strip()
+    pw_type = env_and_context.get("PARAMETER_CMK2NTFY_ACCESS_TOKEN_2")
+    explicit_token = env_and_context.get("PARAMETER_CMK2NTFY_ACCESS_TOKEN_3_2")
+    pw_id = env_and_context.get("PARAMETER_CMK2NTFY_ACCESS_TOKEN_3_1")
+
+    # If explicit password was selected
+    if explicit_token and isinstance(explicit_token, str) and explicit_token.strip():
+        return explicit_token.strip()
+
+    # If stored password from Checkmk Password Store
+    if pw_type == "stored_password" or (pw_id and not explicit_token):
+        target_id = pw_id or env_and_context.get("PARAMETER_CMK2NTFY_ACCESS_TOKEN_3") or env_and_context.get("PARAMETER_CMK2NTFY_ACCESS_TOKEN_1")
+        if target_id and isinstance(target_id, str):
+            target_id = target_id.strip()
+            try:
+                from cmk.utils import password_store
+                extracted = password_store.extract(target_id)
+                if extracted:
+                    return str(extracted).strip()
+            except Exception as ps_err:
+                sys.stderr.write(f"cmk2ntfy: password_store.extract({target_id}) failed: {ps_err}\n")
+
+    # 4. Handle serialized tuple / list / ast structures in val or environment
+    if not val:
+        val = env_and_context.get("PARAMETER_CMK2NTFY_ACCESS_TOKEN")
+
+    if val:
+        parsed_val = val
+        if isinstance(val, str) and (val.startswith("(") or val.startswith("[")):
+            import ast
+            try:
+                parsed_val = ast.literal_eval(val)
+            except Exception as ast_err:
+                sys.stderr.write(f"cmk2ntfy: fallback ast parsing failed: {ast_err}\n")
+                parsed_val = val
+
+        if isinstance(parsed_val, (tuple, list)):
+            try:
+                if len(parsed_val) == 3 and parsed_val[0] == "cmk_postprocessed":
+                    p_type = parsed_val[1]
+                    p_data = parsed_val[2]
+                    if p_type == "explicit_password" and isinstance(p_data, (tuple, list)) and len(p_data) == 2:
+                        return str(p_data[1]).strip()
+                    if p_type == "stored_password" and isinstance(p_data, (tuple, list)) and len(p_data) >= 1:
+                        from cmk.utils import password_store
+                        return str(password_store.extract(p_data[0])).strip()
+                elif len(parsed_val) == 2:
+                    if parsed_val[0] == "explicit_password":
+                        if isinstance(parsed_val[1], (tuple, list)) and len(parsed_val[1]) == 2:
+                            return str(parsed_val[1][1]).strip()
+                        return str(parsed_val[1]).strip()
+                    if parsed_val[0] == "stored_password":
+                        from cmk.utils import password_store
+                        p_id = parsed_val[1][0] if isinstance(parsed_val[1], (tuple, list)) else parsed_val[1]
+                        return str(password_store.extract(p_id)).strip()
+            except Exception as err:
+                sys.stderr.write(f"cmk2ntfy: failed extracting password from structure: {err}\n")
+
+        if isinstance(val, str) and not (val.startswith("(") or val.startswith("[")):
+            return val.strip()
+
+    # 5. Last fallback: scan all PARAMETER_CMK2NTFY_ACCESS_TOKEN_* variables for non-empty values
+    for k, v in env_and_context.items():
+        if k.startswith("PARAMETER_CMK2NTFY_ACCESS_TOKEN_") and isinstance(v, str):
+            v_clean = v.strip()
+            if v_clean not in ("cmk_postprocessed", "explicit_password", "stored_password", ""):
+                try:
+                    from cmk.utils import password_store
+                    extracted = password_store.extract(v_clean)
+                    if extracted:
+                        return str(extracted).strip()
+                except Exception:
+                    pass
+                if not v_clean.startswith("uuid"):
+                    return v_clean
 
     return ""
 

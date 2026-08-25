@@ -21,7 +21,7 @@
            'notifications': ['cmk2ntfy']},
  'name': 'cmk2ntfy',
  'title': 'cmk2ntfy',
- 'version': '1.2.0',
+ 'version': '1.2.1',
  'version.min_required': '2.3.0p1',
  'version.packaged': '2.5.0p2',
  'version.usable_until': None}
